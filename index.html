@@ -243,7 +243,7 @@ form.logform textarea{resize:none;min-height:64px}
 <div class="loading" id="loading">正在读取你的便签…</div>
 
 <section class="float" id="head">
-  <h1><span class="rainbow">工作台</span><small id="dayline"></small><button id="signout" type="button">退出</button></h1>
+  <h1><span class="rainbow">工作台</span><small id="dayline"></small><button id="signout" type="button">锁定</button></h1>
   <div class="stats" id="stats"></div>
   <div class="chips" id="chips"></div>
 </section>
@@ -308,10 +308,11 @@ form.logform textarea{resize:none;min-height:64px}
 
 <div id="login" hidden>
   <form id="loginform" autocomplete="on">
-    <h2><span class="rainbow" style="background:linear-gradient(90deg,var(--c1),var(--c2),var(--c5),var(--c3),var(--c4),var(--c6));-webkit-background-clip:text;background-clip:text;color:transparent">工作台</span></h2>
-    <p>输入邮箱，我们会发一个登录链接给你。</p>
-    <input class="field" type="email" id="login-email" placeholder="you@example.com" required autocomplete="email">
-    <button class="go" type="submit">发送登录链接</button>
+    <h2><span style="background:linear-gradient(90deg,var(--c1),var(--c2),var(--c5),var(--c3),var(--c4),var(--c6));-webkit-background-clip:text;background-clip:text;color:transparent">工作台</span></h2>
+    <p>输入你的口令。每台设备只需要输一次，之后会记住。</p>
+    <input type="text" name="username" value="workbench" autocomplete="username" hidden>
+    <input class="field" type="password" id="login-key" placeholder="口令" required autocomplete="current-password">
+    <button class="go" type="submit">打开工作台</button>
     <div class="msg" id="login-msg" hidden></div>
     <div class="msg diag" id="login-diag" hidden></div>
   </form>
@@ -742,7 +743,7 @@ $('#catadd').addEventListener('submit',e=>{
   newColor=COLORS[(COLORS.indexOf(newColor)+3)%COLORS.length];$('#new-cat').value='';saveAreas();renderAll();renderCatPop();
 });
 
-/* storage: Supabase. colI / colL / areaRef keep the same shape the page code calls. */
+/* storage: Supabase, no accounts. Every request carries the device's passphrase in a header; RLS checks it. */
 const IMAP={title:'title',area:'area',status:'status',next:'next_step',due:'due',who:'who',note:'note',x:'x',y:'y',waitingSince:'waiting_since',doneAt:'done_at',created:'created',updated:'updated'};
 const LMAP={date:'date',at:'at',text:'text',kind:'kind',itemId:'item_id',area:'area'};
 const NULLABLE=new Set(['due','waitingSince','doneAt']);
@@ -751,7 +752,7 @@ function toRow(o,map){const r={};for(const k in o){if(!map[k])continue;let v=o[k
 function fromRow(r,map){const o={id:r.id};for(const k in map){let v=r[map[k]];if(k==='due'||TEXTS.has(k))v=v??'';if(v===null)v=undefined;o[k]=v}return o}
 async function must(p){const {error}=await p;if(error)throw error}
 function tableRef(table,map){return{doc(id){return{
-  set:d=>must(sb.from(table).upsert({id,user_id:uid,...toRow(d,map)})),
+  set:d=>must(sb.from(table).upsert({id,...toRow(d,map)})),
   update:d=>must(sb.from(table).update(toRow(d,map)).eq('id',id)),
   delete:()=>must(sb.from(table).delete().eq('id',id))}}}}
 
@@ -761,70 +762,67 @@ async function loadAll(){
     sb.from('logs').select('*').order('at',{ascending:false}).limit(1000),
     sb.from('settings').select('value').eq('key','areas').maybeSingle()]);
   if(a.error||b.error){notice('读取失败：'+((a.error||b.error).message)+'。刷新页面再试一次。');return}
+  if(dragging)return;
   const first=!loadedI;
   items=a.data.map(r=>fromRow(r,IMAP));logs=b.data.map(r=>fromRow(r,LMAP));
   const v=c.data&&c.data.value;areas=Array.isArray(v)&&v.length?v.slice():DEFAULT_AREAS.slice();
   loadedI=loadedL=true;renderAll();
   if(first&&firstFit)setTimeout(fitAll,50);
 }
-let reloadT=0;const scheduleReload=()=>{clearTimeout(reloadT);reloadT=setTimeout(loadAll,500)};
-let started=false;
-function start(session){
-  uid=session.user.id;$('#login').hidden=true;
-  if(started)return;started=true;
+let started=false,pollT=0;
+function start(){
+  $('#login').hidden=true;if(started)return;started=true;
   colI=tableRef('items',IMAP);colL=tableRef('logs',LMAP);
-  areaRef={set:d=>must(sb.from('settings').upsert({user_id:uid,key:'areas',value:d.list},{onConflict:'user_id,key'}))};
+  areaRef={set:d=>must(sb.from('settings').upsert({key:'areas',value:d.list},{onConflict:'key'}))};
   loadAll();
-  sb.channel('workbench')
-    .on('postgres_changes',{event:'*',schema:'public',table:'items'},scheduleReload)
-    .on('postgres_changes',{event:'*',schema:'public',table:'logs'},scheduleReload)
-    .on('postgres_changes',{event:'*',schema:'public',table:'settings'},scheduleReload)
-    .subscribe();
+  pollT=setInterval(()=>{if(!document.hidden&&!dragging)loadAll()},30000);   // keeps other devices in step
 }
-function showLogin(){$('#login').hidden=false;$('#loading').hidden=true}
+function showLogin(){$('#login').hidden=false;$('#loading').hidden=true;setTimeout(()=>{const k=$('#login-key');if(k)k.focus()},50)}
 
 /* boot */
 applyView();renderAll();
 let firstFit=true;try{firstFit=!localStorage.getItem('wb-view')}catch(_){}
-let setupError='';
-function diag(m){setupError=m;const d=$('#login-diag');d.textContent=m;d.hidden=!m;$('#loginform button[type=submit]').disabled=!!m&&!sb}
+function diag(m){const d=$('#login-diag');d.textContent=m;d.hidden=!m}
+function readKey(){try{return localStorage.getItem('wb-key')||''}catch(_){return ''}}
+function saveKey(k){try{localStorage.setItem('wb-key',k)}catch(_){}}
+async function unlock(key,remember){
+  const cfg=window.WORKBENCH_CONFIG;
+  sb=window.supabase.createClient(cfg.supabaseUrl.replace(/\/$/,''),cfg.supabaseAnonKey,
+    {auth:{persistSession:false,autoRefreshToken:false},global:{headers:{'x-workbench-key':key}}});
+  const {data,error}=await sb.rpc('workbench_ok');
+  if(error){showLogin();diag(/workbench_ok|function/i.test(error.message)
+    ?'数据库里还没有建好表。去 Supabase → SQL Editor 运行新版 supabase/schema.sql。'
+    :'连不上 Supabase：'+error.message);return false}
+  if(data!==true)return false;
+  if(remember)saveKey(key);
+  start();return true;
+}
 (async()=>{
   const cfg=window.WORKBENCH_CONFIG;
   try{
     if(!cfg){showLogin();diag('没读到 config.js。\n确认它和 index.html 在同一个文件夹，并且已经推到 GitHub。打开 你的网址/config.js 应该能看到内容。');return}
     if(!cfg.supabaseUrl||!cfg.supabaseAnonKey||String(cfg.supabaseUrl).includes('YOUR_')||String(cfg.supabaseAnonKey).includes('YOUR_')){
       showLogin();diag('config.js 里还是示例值。\n把 Supabase 的 Project URL 和 anon key 直接写进 config.js。注意：这是静态网页，Vercel 的环境变量读不到。');return}
-    if(!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(cfg.supabaseUrl)){
-      showLogin();diag('supabaseUrl 格式不对：应该像 https://abcdefgh.supabase.co ，结尾不要带 /rest/v1。');return}
+    if(!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(cfg.supabaseUrl)){showLogin();diag('supabaseUrl 格式不对：应该像 https://abcdefgh.supabase.co ，结尾不要带 /rest/v1。');return}
     if(!window.supabase||!window.supabase.createClient){showLogin();diag('Supabase 的程序没有加载上。检查网络，或者关掉广告拦截插件后刷新。');return}
-    sb=window.supabase.createClient(cfg.supabaseUrl.replace(/\/$/,''),cfg.supabaseAnonKey);
-    sb.auth.onAuthStateChange((_e,sess)=>{if(sess)start(sess);else if(started){started=false;items=[];logs=[];renderAll();showLogin()}});
-    // error coming back from the email link (expired, already used, wrong redirect)
-    const hp=new URLSearchParams(location.hash.slice(1)+'&'+location.search.slice(1));
-    if(hp.get('error_description')){showLogin();$('#login-msg').hidden=false;
-      $('#login-msg').textContent='登录链接没成功：'+hp.get('error_description').replace(/\+/g,' ')+'。重新发一封，并在几分钟内点开最新的那封。';
-      try{history.replaceState(null,'',location.pathname)}catch(_){}}
-    const {data,error}=await sb.auth.getSession();
-    if(error){showLogin();diag('连不上 Supabase：'+error.message);return}
-    if(data&&data.session)start(data.session);else showLogin();
+    const key=cfg.workbenchKey||readKey();
+    if(key&&await unlock(key,!cfg.workbenchKey))return;
+    if(key&&!cfg.workbenchKey){try{localStorage.removeItem('wb-key')}catch(_){}}
+    if(cfg.workbenchKey){showLogin();diag('config.js 里的 workbenchKey 和数据库里的口令不一致。');return}
+    showLogin();
   }catch(e){showLogin();diag('启动出错：'+(e&&e.message||e))}
 })();
 $('#loginform').addEventListener('submit',async e=>{
-  e.preventDefault();const email=$('#login-email').value.trim();const msg=$('#login-msg');
-  if(!email)return;
-  if(!sb){msg.hidden=false;msg.textContent='还不能发送：先解决下面红色框里的问题。';return}
-  const btn=$('#loginform button[type=submit]');btn.disabled=true;
-  msg.hidden=false;msg.textContent='发送中…';
-  const {error}=await sb.auth.signInWithOtp({email,options:{emailRedirectTo:location.origin+location.pathname}});
+  e.preventDefault();const key=$('#login-key').value;const msg=$('#login-msg');if(!key)return;
+  if(!window.WORKBENCH_CONFIG||!window.supabase){msg.hidden=false;msg.textContent='先解决下面红色框里的问题。';return}
+  const btn=$('#loginform button[type=submit]');btn.disabled=true;msg.hidden=false;msg.textContent='打开中…';
+  const ok=await unlock(key,true).catch(err=>{diag('出错了：'+(err&&err.message||err));return false});
   btn.disabled=false;
-  if(!error){msg.textContent='已发送到 '+email+'。去邮箱点最新那封的链接（也看看垃圾邮件），会自动回到这里。';return}
-  const m=error.message||'';
-  msg.textContent=/rate|seconds|limit/i.test(m)?'发得太频繁了，Supabase 免费版每小时只能发几封。等一会儿再试，或者用上一封邮件里的链接。'
-    :/signups? not allowed|not allowed/i.test(m)?'这个邮箱还没有账号，而注册被关掉了。去 Supabase → Authentication → Sign In / Providers 临时打开注册，登录一次后再关掉。'
-    :'没发出去：'+m;
+  if(ok){msg.hidden=true;toast('add','欢迎回来','这台设备记住你了')}
+  else if($('#login-diag').hidden){msg.textContent='口令不对，再试一次。';$('#login-key').select()}
 });
-$('#signout').addEventListener('click',()=>{if(sb)sb.auth.signOut()});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){renderAll();if(started)scheduleReload()}});
+$('#signout').addEventListener('click',()=>{try{localStorage.removeItem('wb-key')}catch(_){}location.reload()});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){renderAll();if(started)loadAll()}});
 </script>
 
 </body>
