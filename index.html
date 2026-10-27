@@ -232,6 +232,7 @@ form.logform textarea{resize:none;min-height:64px}
 #login p{margin:0;color:var(--muted);font-size:14px}
 #login .msg{font-size:13px;color:var(--ink);background:var(--panel-2);border-radius:10px;padding:10px 12px}
 #login .msg[hidden]{display:none}
+#login .diag{background:var(--hot);color:#fff;white-space:pre-line}
 #signout{border:0;background:transparent;color:var(--muted);font-size:12px;padding:0;text-decoration:underline}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
@@ -312,6 +313,7 @@ form.logform textarea{resize:none;min-height:64px}
     <input class="field" type="email" id="login-email" placeholder="you@example.com" required autocomplete="email">
     <button class="go" type="submit">发送登录链接</button>
     <div class="msg" id="login-msg" hidden></div>
+    <div class="msg diag" id="login-diag" hidden></div>
   </form>
 </div>
 
@@ -713,7 +715,7 @@ $('#new-sw').onclick=()=>{newColor=COLORS[(COLORS.indexOf(newColor)+1)%COLORS.le
 $('#composer').addEventListener('submit',e=>{
   e.preventDefault();
   const title=$('#c-title').value.trim();if(!title){$('#c-title').focus();return}
-  if(!colI){notice('现在无法保存：请先登录。');return}
+  if(!colI){showLogin();return}
   let p=composerPos;
   if(!p){const c=toWorld(innerWidth/2,innerHeight/2);p={x:c.x-CARD_W/2+(Math.random()-.5)*80,y:c.y-70+(Math.random()-.5)*60}}
   else p={x:p.x-CARD_W/2,y:p.y-30};
@@ -728,14 +730,14 @@ $('#composer').addEventListener('submit',e=>{
 });
 $('#logform').addEventListener('submit',e=>{
   e.preventDefault();const text=$('#log-text').value.trim();if(!text){$('#log-text').focus();return}
-  if(!colL){notice('现在无法保存：请先登录。');return}
+  if(!colL){showLogin();return}
   addLog(text,'manual',null,$('#log-area').value);$('#log-text').value='';renderAll();
   const r=$('#log-text').getBoundingClientRect();burst(r.left+r.width/2,r.top+20,28,'add');
   toast('add',pick(['记下了，今天没白过','又多一笔，很充实','这些都是你做到的事']),text.length>24?text.slice(0,24)+'…':text);
 });
 $('#catadd').addEventListener('submit',e=>{
   e.preventDefault();const name=$('#new-cat').value.trim();if(!name){$('#new-cat').focus();return}
-  if(!areaRef){notice('现在无法保存：请先登录。');return}
+  if(!areaRef){showLogin();return}
   const i=areas.findIndex(a=>a.id==='other');areas.splice(i<0?areas.length:i,0,{id:nid('a'),name,color:newColor});
   newColor=COLORS[(COLORS.indexOf(newColor)+3)%COLORS.length];$('#new-cat').value='';saveAreas();renderAll();renderCatPop();
 });
@@ -784,21 +786,42 @@ function showLogin(){$('#login').hidden=false;$('#loading').hidden=true}
 /* boot */
 applyView();renderAll();
 let firstFit=true;try{firstFit=!localStorage.getItem('wb-view')}catch(_){}
+let setupError='';
+function diag(m){setupError=m;const d=$('#login-diag');d.textContent=m;d.hidden=!m;$('#loginform button[type=submit]').disabled=!!m&&!sb}
 (async()=>{
-  const cfg=window.WORKBENCH_CONFIG||{};
-  if(!window.supabase||!cfg.supabaseUrl||cfg.supabaseUrl.includes('YOUR_')){
-    loadedI=loadedL=true;renderAll();notice('还没设置 Supabase：请在 config.js 里填入 Project URL 和 anon key。');return}
-  sb=window.supabase.createClient(cfg.supabaseUrl,cfg.supabaseAnonKey);
-  const {data:{session}}=await sb.auth.getSession();
-  if(session)start(session);else showLogin();
-  sb.auth.onAuthStateChange((_e,s)=>{if(s)start(s);else{started=false;items=[];logs=[];renderAll();showLogin()}});
+  const cfg=window.WORKBENCH_CONFIG;
+  try{
+    if(!cfg){showLogin();diag('没读到 config.js。\n确认它和 index.html 在同一个文件夹，并且已经推到 GitHub。打开 你的网址/config.js 应该能看到内容。');return}
+    if(!cfg.supabaseUrl||!cfg.supabaseAnonKey||String(cfg.supabaseUrl).includes('YOUR_')||String(cfg.supabaseAnonKey).includes('YOUR_')){
+      showLogin();diag('config.js 里还是示例值。\n把 Supabase 的 Project URL 和 anon key 直接写进 config.js。注意：这是静态网页，Vercel 的环境变量读不到。');return}
+    if(!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(cfg.supabaseUrl)){
+      showLogin();diag('supabaseUrl 格式不对：应该像 https://abcdefgh.supabase.co ，结尾不要带 /rest/v1。');return}
+    if(!window.supabase||!window.supabase.createClient){showLogin();diag('Supabase 的程序没有加载上。检查网络，或者关掉广告拦截插件后刷新。');return}
+    sb=window.supabase.createClient(cfg.supabaseUrl.replace(/\/$/,''),cfg.supabaseAnonKey);
+    sb.auth.onAuthStateChange((_e,sess)=>{if(sess)start(sess);else if(started){started=false;items=[];logs=[];renderAll();showLogin()}});
+    // error coming back from the email link (expired, already used, wrong redirect)
+    const hp=new URLSearchParams(location.hash.slice(1)+'&'+location.search.slice(1));
+    if(hp.get('error_description')){showLogin();$('#login-msg').hidden=false;
+      $('#login-msg').textContent='登录链接没成功：'+hp.get('error_description').replace(/\+/g,' ')+'。重新发一封，并在几分钟内点开最新的那封。';
+      try{history.replaceState(null,'',location.pathname)}catch(_){}}
+    const {data,error}=await sb.auth.getSession();
+    if(error){showLogin();diag('连不上 Supabase：'+error.message);return}
+    if(data&&data.session)start(data.session);else showLogin();
+  }catch(e){showLogin();diag('启动出错：'+(e&&e.message||e))}
 })();
 $('#loginform').addEventListener('submit',async e=>{
   e.preventDefault();const email=$('#login-email').value.trim();const msg=$('#login-msg');
-  if(!sb||!email)return;
+  if(!email)return;
+  if(!sb){msg.hidden=false;msg.textContent='还不能发送：先解决下面红色框里的问题。';return}
+  const btn=$('#loginform button[type=submit]');btn.disabled=true;
   msg.hidden=false;msg.textContent='发送中…';
   const {error}=await sb.auth.signInWithOtp({email,options:{emailRedirectTo:location.origin+location.pathname}});
-  msg.textContent=error?'没发出去：'+error.message:'已发送。去邮箱点链接，回来就能用了。';
+  btn.disabled=false;
+  if(!error){msg.textContent='已发送到 '+email+'。去邮箱点最新那封的链接（也看看垃圾邮件），会自动回到这里。';return}
+  const m=error.message||'';
+  msg.textContent=/rate|seconds|limit/i.test(m)?'发得太频繁了，Supabase 免费版每小时只能发几封。等一会儿再试，或者用上一封邮件里的链接。'
+    :/signups? not allowed|not allowed/i.test(m)?'这个邮箱还没有账号，而注册被关掉了。去 Supabase → Authentication → Sign In / Providers 临时打开注册，登录一次后再关掉。'
+    :'没发出去：'+m;
 });
 $('#signout').addEventListener('click',()=>{if(sb)sb.auth.signOut()});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){renderAll();if(started)scheduleReload()}});
